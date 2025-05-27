@@ -1,6 +1,9 @@
 #include "main.h"
 #include <stdio.h>
 #include <string.h>
+#include "stm32f4xx_hal.h"
+#include "stm32f4xx_hal_tim.h"
+
 
 ADC_HandleTypeDef hadc1;
 UART_HandleTypeDef huart2;
@@ -140,3 +143,4 @@ static void MX_TIM3_Init(void)
     sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
     HAL_TIM_PWM_ConfigChannel(&htim3, &sConfigOC, TIM_CHANNEL_1);
 }
+
