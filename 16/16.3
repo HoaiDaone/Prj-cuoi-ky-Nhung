@@ -1,0 +1,171 @@
+#include "main.h"
+
+void SystemClock_Config(void);
+void Error_Handler(void);
+void Buzzer_GPIO_Init(void);
+void MQ2_GPIO_Init(void);
+void LED_GPIO_Init(void);
+void Button_GPIO_Init(void);
+
+int main(void) {
+    HAL_Init();
+    SystemClock_Config();
+    Buzzer_GPIO_Init();
+    MQ2_GPIO_Init();
+    LED_GPIO_Init();
+    Button_GPIO_Init();
+
+    uint8_t gasLevel = 0;           // 0: không khí, 1: thấp, 2: cao, 3: nguy hiểm
+    uint8_t system_running = 1;     // 1: đang hoạt động, 0: dừng
+    GPIO_PinState prevSW1 = GPIO_PIN_SET;
+    GPIO_PinState prevSW2 = GPIO_PIN_SET;
+
+    while (1) {
+    	// ==== Đọc nút SW1 - chuyển trạng thái hệ thống ====
+        GPIO_PinState sw1 = HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_6);
+        if (sw1 == GPIO_PIN_RESET && prevSW1 == GPIO_PIN_SET) {
+            system_running = 1;
+            HAL_Delay(200); // chống dội
+        }
+        prevSW1 = sw1;
+
+
+        // ==== Đọc nút SW2 - reset về trạng thái ban đầu ====
+        GPIO_PinState sw2 = HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_7);
+        if (sw2 == GPIO_PIN_RESET && prevSW2 == GPIO_PIN_SET) {
+            gasLevel = 0;
+            system_running = 1;
+            HAL_Delay(200);
+        }
+        prevSW2 = sw2;
+
+        if (system_running) {
+            // ====== Đang hoạt động ======
+            GPIO_PinState mq2_state = HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_0);
+
+            // Giả lập mức khí gas đơn giản (thay bằng ADC nếu cần)
+            if (mq2_state == GPIO_PIN_SET) {
+                gasLevel = 0;
+            } else {
+                gasLevel = (gasLevel + 1) % 4;
+            }
+
+            // ----- Xử lý hiển thị và buzzer theo gasLevel -----
+            switch (gasLevel) {
+                case 0: // Không có khí gas
+                    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0, GPIO_PIN_SET);   // LED xanh
+                    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_1, GPIO_PIN_RESET); // LED vàng
+                    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_2, GPIO_PIN_RESET); // LED đỏ
+                    HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_RESET); // Buzzer
+                    HAL_Delay(1000);
+                    break;
+                case 1: // Nồng độ khí thấp
+                    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0, GPIO_PIN_RESET);
+                    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_1, GPIO_PIN_SET);
+                    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_2, GPIO_PIN_RESET);
+                    HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_SET);
+                    HAL_Delay(1000);
+                    break;
+                case 2: // Khí gas cao - nhấp nháy LED đỏ 1Hz
+                    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0, GPIO_PIN_RESET);
+                    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_1, GPIO_PIN_RESET);
+                    HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_2);
+                    HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_5);
+                    HAL_Delay(500);
+                    break;
+                case 3: // Khí gas nguy hiểm - nháy 5Hz
+                    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0, GPIO_PIN_RESET);
+                    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_1, GPIO_PIN_RESET);
+                    HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_2);
+                    HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_5);
+                    HAL_Delay(100);
+                    break;
+            }
+        } else {
+            // ====== Trạng thái dừng ======
+            HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0, GPIO_PIN_SET);   // LED xanh
+            HAL_GPIO_WritePin(GPIOB, GPIO_PIN_1, GPIO_PIN_SET);   // LED vàng
+            HAL_GPIO_WritePin(GPIOB, GPIO_PIN_2, GPIO_PIN_SET);   // LED đỏ
+            HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_RESET); // Buzzer
+            HAL_Delay(500);
+        }
+    }
+}
+
+// ==== Cấu hình chân Output cho buzzer (PA5) ====
+void Buzzer_GPIO_Init(void) {
+    __HAL_RCC_GPIOA_CLK_ENABLE();
+    GPIO_InitTypeDef GPIO_InitStruct = {0};
+    GPIO_InitStruct.Pin = GPIO_PIN_5;
+    GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+    HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+}
+
+// ==== Chân tín hiệu MQ2 (PA0 - Digital) ====
+void MQ2_GPIO_Init(void) {
+    __HAL_RCC_GPIOA_CLK_ENABLE();
+    GPIO_InitTypeDef GPIO_InitStruct = {0};
+    GPIO_InitStruct.Pin = GPIO_PIN_0;
+    GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+}
+
+// ==== Cấu hình 3 LED giao thông: Xanh (PB0), Vàng (PB1), Đỏ (PB2) ====
+void LED_GPIO_Init(void) {
+    __HAL_RCC_GPIOB_CLK_ENABLE();
+    GPIO_InitTypeDef GPIO_InitStruct = {0};
+    GPIO_InitStruct.Pin = GPIO_PIN_0 | GPIO_PIN_1 | GPIO_PIN_2;
+    GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+    HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+}
+
+// ==== Cấu hình 2 nút nhấn: SW1 (PA6), SW2 (PA7) ====
+void Button_GPIO_Init(void) {
+    __HAL_RCC_GPIOA_CLK_ENABLE();
+    GPIO_InitTypeDef GPIO_InitStruct = {0};
+    GPIO_InitStruct.Pin = GPIO_PIN_6 | GPIO_PIN_7;
+    GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+    GPIO_InitStruct.Pull = GPIO_PULLUP;
+    HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+}
+
+// ==== Hàm xử lý lỗi chung ====
+void Error_Handler(void) {
+    while (1);
+}
+
+// ==== Cấu hình Clock hệ thống: dùng HSI + PLL ====
+void SystemClock_Config(void) {
+    RCC_OscInitTypeDef RCC_OscInitStruct = {0};
+    RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
+
+    RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
+    RCC_OscInitStruct.HSIState = RCC_HSI_ON;
+    RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
+    RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
+    RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSI;
+    RCC_OscInitStruct.PLL.PLLM = 16;
+    RCC_OscInitStruct.PLL.PLLN = 336;
+    RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV4;
+    RCC_OscInitStruct.PLL.PLLQ = 7;
+
+    if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK) {
+        Error_Handler();
+    }
+
+    RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK | RCC_CLOCKTYPE_SYSCLK |
+                                  RCC_CLOCKTYPE_PCLK1 | RCC_CLOCKTYPE_PCLK2;
+    RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
+    RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
+    RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV2;
+    RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
+
+    if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_2) != HAL_OK) {
+        Error_Handler();
+    }
+}
