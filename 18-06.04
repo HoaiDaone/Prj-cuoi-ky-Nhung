@@ -1,0 +1,297 @@
+#include "main.h"
+#include <stdio.h>
+#include <string.h>
+#include "lcd_i2c.h"
+
+UART_HandleTypeDef huart2;  // UART cho ESP8266
+
+void SystemClock_Config(void);
+void Error_Handler(void);
+void Buzzer_GPIO_Init(void);
+void MQ2_GPIO_Init(void);
+void LED_GPIO_Init(void);
+void Button_GPIO_Init(void);
+void Relay_GPIO_Init(void);
+void ESP_SendCommand(const char *cmd);
+void ESP_ConnectWiFi(void);
+void Send_Telegram_Notification(void);
+
+int main(void) {
+    HAL_Init();
+    SystemClock_Config();
+    Buzzer_GPIO_Init();
+    MQ2_GPIO_Init();
+    LED_GPIO_Init();
+    Button_GPIO_Init();
+    Relay_GPIO_Init();
+    I2C1_Init();
+    LCD_Init();
+    ESP_ConnectWiFi();
+    MX_USART2_UART_Init();
+
+
+    uint8_t gasLevel = 0;
+    uint8_t system_running = 1;
+    GPIO_PinState prevSW1 = GPIO_PIN_SET;
+    GPIO_PinState prevSW2 = GPIO_PIN_SET;
+    static uint16_t ppm_last = 0;
+    static uint8_t reset_flag = 0;
+
+    while (1) {
+        GPIO_PinState sw1 = HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_6);
+        if (sw1 == GPIO_PIN_RESET && prevSW1 == GPIO_PIN_SET) {
+            system_running = !system_running;
+            HAL_Delay(200);
+        }
+        prevSW1 = sw1;
+
+        GPIO_PinState sw2 = HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_7);
+        if (sw2 == GPIO_PIN_RESET && prevSW2 == GPIO_PIN_SET) {
+            gasLevel = 0;
+            ppm_last = 0;
+            system_running = 1;
+            reset_flag = 1;
+            HAL_Delay(200);
+        }
+        prevSW2 = sw2;
+
+        if (system_running) {
+            GPIO_PinState mq2_state = HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_0);
+            if (mq2_state == GPIO_PIN_SET) {
+                gasLevel = 0;
+            } else {
+                gasLevel = (gasLevel + 1) % 4;
+            }
+
+            switch (gasLevel) {
+                case 0:
+                    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0, GPIO_PIN_SET);
+                    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_1, GPIO_PIN_RESET);
+                    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_2, GPIO_PIN_RESET);
+                    HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_RESET);
+                    HAL_GPIO_WritePin(GPIOA, GPIO_PIN_1, GPIO_PIN_RESET);
+                    break;
+                case 1:
+                    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0, GPIO_PIN_RESET);
+                    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_1, GPIO_PIN_SET);
+                    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_2, GPIO_PIN_RESET);
+                    HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_RESET);
+                    HAL_GPIO_WritePin(GPIOA, GPIO_PIN_1, GPIO_PIN_RESET);
+                    break;
+                case 2:
+                    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0, GPIO_PIN_RESET);
+                    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_1, GPIO_PIN_RESET);
+                    HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_2);
+                    HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_SET);
+                    HAL_GPIO_WritePin(GPIOA, GPIO_PIN_1, GPIO_PIN_RESET);
+                    break;
+                case 3:
+                    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0, GPIO_PIN_RESET);
+                    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_1, GPIO_PIN_RESET);
+                    HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_2);
+                    HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_RESET);
+                    HAL_GPIO_WritePin(GPIOA, GPIO_PIN_1, GPIO_PIN_SET);
+                    Send_Telegram_Notification();
+                    break;
+            }
+        } else {
+            HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0, GPIO_PIN_SET);
+            HAL_GPIO_WritePin(GPIOB, GPIO_PIN_1, GPIO_PIN_SET);
+            HAL_GPIO_WritePin(GPIOB, GPIO_PIN_2, GPIO_PIN_SET);
+            HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_RESET);
+            HAL_GPIO_WritePin(GPIOA, GPIO_PIN_1, GPIO_PIN_RESET);
+        }
+
+        uint16_t ppm = 0;
+        switch (gasLevel) {
+            case 0: ppm = 0; break;
+            case 1: ppm = 200; break;
+            case 2: ppm = 600; break;
+            case 3: ppm = 1000; break;
+        }
+
+        if (reset_flag) {
+            ppm_last = 0;
+            reset_flag = 0;
+        } else if (system_running && ppm > 0) {
+            ppm_last = ppm;
+        }
+
+        char line1[17], line2[17];
+        snprintf(line1, sizeof(line1), "%-6s %4dppm", system_running ? "WORK" : "STOP", ppm_last);
+
+        if (!system_running) {
+            snprintf(line2, sizeof(line2), "System stopped  ");
+        } else if (ppm == 0) {
+            snprintf(line2, sizeof(line2), "No Gas          ");
+        } else if (ppm < 300) {
+            snprintf(line2, sizeof(line2), "Gas Low         ");
+        } else if (ppm < 1000) {
+            snprintf(line2, sizeof(line2), "Gas High        ");
+        } else {
+            snprintf(line2, sizeof(line2), "DANGER Level!   ");
+        }
+
+        LCD_SetCursor(0, 0); LCD_Print(line1);
+        LCD_SetCursor(1, 0); LCD_Print(line2);
+
+        HAL_Delay(500);
+    }
+}
+
+void ESP_SendCommand(const char *cmd) {
+    HAL_UART_Transmit(&huart2, (uint8_t *)cmd, strlen(cmd), HAL_MAX_DELAY);
+    HAL_Delay(300);
+}
+
+void ESP_ConnectWiFi(void) {
+    ESP_SendCommand("AT\r\n");
+    HAL_Delay(1000);
+    ESP_SendCommand("AT+CWMODE=1\r\n");
+    HAL_Delay(1000);
+    ESP_SendCommand("AT+CWJAP=\"Hi im Bu\",\"FlopNhatTikTok\"\r\n");
+    HAL_Delay(8000);
+}
+
+void Send_Telegram_Notification(void) {
+    ESP_SendCommand("AT+CIPSTART=\"TCP\",\"hook.eu2.make.com\",80\r\n");
+    HAL_Delay(1000);
+
+    const char *payload = "{\"message\":\"Gas detected!\"}";
+    int contentLength = strlen(payload);
+
+    char cipSendCmd[64];
+    sprintf(cipSendCmd, "AT+CIPSEND=%d\r\n", 200 + contentLength);
+    ESP_SendCommand(cipSendCmd);
+    HAL_Delay(500);
+
+    char httpRequest[512];
+    sprintf(httpRequest,
+        "POST /3f4z6zmelj6x2723szc9hf8xglkkwsr0 HTTP/1.1\r\n"
+        "Host: hook.eu2.make.com\r\n"
+        "Content-Type: application/json\r\n"
+        "Content-Length: %d\r\n\r\n"
+        "%s",
+        contentLength, payload);
+
+    ESP_SendCommand(httpRequest);
+    HAL_Delay(1000);
+} // END
+// ==== GPIO Init Functions ====
+void MX_USART2_UART_Init(void)
+{
+    __HAL_RCC_USART2_CLK_ENABLE();
+    __HAL_RCC_GPIOA_CLK_ENABLE();
+
+    // PA2 -> TX, PA3 -> RX
+    GPIO_InitTypeDef GPIO_InitStruct = {0};
+    GPIO_InitStruct.Pin = GPIO_PIN_2 | GPIO_PIN_3;
+    GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
+    GPIO_InitStruct.Alternate = GPIO_AF7_USART2;
+    HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+    huart2.Instance = USART2;
+    huart2.Init.BaudRate = 115200;
+    huart2.Init.WordLength = UART_WORDLENGTH_8B;
+    huart2.Init.StopBits = UART_STOPBITS_1;
+    huart2.Init.Parity = UART_PARITY_NONE;
+    huart2.Init.Mode = UART_MODE_TX_RX;
+    huart2.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+    huart2.Init.OverSampling = UART_OVERSAMPLING_16;
+
+    if (HAL_UART_Init(&huart2) != HAL_OK)
+    {
+        Error_Handler();
+    }
+}
+
+void Buzzer_GPIO_Init(void) {
+    __HAL_RCC_GPIOA_CLK_ENABLE();
+    GPIO_InitTypeDef GPIO_InitStruct = {0};
+    GPIO_InitStruct.Pin = GPIO_PIN_5;
+    GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+    HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+}
+
+void MQ2_GPIO_Init(void) {
+    __HAL_RCC_GPIOA_CLK_ENABLE();
+    GPIO_InitTypeDef GPIO_InitStruct = {0};
+    GPIO_InitStruct.Pin = GPIO_PIN_0;
+    GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+}
+
+void LED_GPIO_Init(void) {
+    __HAL_RCC_GPIOB_CLK_ENABLE();
+    GPIO_InitTypeDef GPIO_InitStruct = {0};
+    GPIO_InitStruct.Pin = GPIO_PIN_0 | GPIO_PIN_1 | GPIO_PIN_2;
+    GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+    HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+}
+
+void Button_GPIO_Init(void) {
+    __HAL_RCC_GPIOA_CLK_ENABLE();
+    GPIO_InitTypeDef GPIO_InitStruct = {0};
+    GPIO_InitStruct.Pin = GPIO_PIN_6 | GPIO_PIN_7;
+    GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+    GPIO_InitStruct.Pull = GPIO_PULLUP;
+    HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+}
+
+void Relay_GPIO_Init(void) {
+    __HAL_RCC_GPIOA_CLK_ENABLE();
+    GPIO_InitTypeDef GPIO_InitStruct = {0};
+    GPIO_InitStruct.Pin = GPIO_PIN_1;
+    GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+    HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+    HAL_GPIO_WritePin(GPIOA, GPIO_PIN_1, GPIO_PIN_RESET); // Tắt rơ-le ban đầu
+}
+
+// ==== Clock & Error Handler ====
+
+void Error_Handler(void) {
+    while (1);
+}
+
+void SystemClock_Config(void) {
+    RCC_OscInitTypeDef RCC_OscInitStruct = {0};
+    RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
+
+    __HAL_RCC_PWR_CLK_ENABLE();
+    __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE2);
+
+    RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
+    RCC_OscInitStruct.HSIState = RCC_HSI_ON;
+    RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
+    RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
+    RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSI;
+    RCC_OscInitStruct.PLL.PLLM = 16;
+    RCC_OscInitStruct.PLL.PLLN = 336;
+    RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV4;
+    RCC_OscInitStruct.PLL.PLLQ = 7;
+
+    if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK) {
+        Error_Handler();
+    }
+
+    RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK | RCC_CLOCKTYPE_SYSCLK |
+                                  RCC_CLOCKTYPE_PCLK1 | RCC_CLOCKTYPE_PCLK2;
+    RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
+    RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
+    RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV2;
+    RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
+
+    if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_2) != HAL_OK) {
+        Error_Handler();
+    }
+}
+
